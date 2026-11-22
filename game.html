@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STAR CATCH — a tiny one-button arcade game</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0b1026; height: 100%; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; font-family: system-ui, sans-serif; }
+  #wrap { position: relative; width: min(100vw, 56.25vh); aspect-ratio: 9 / 16; max-height: 100vh; }
+  canvas { display: block; width: 100%; height: 100%; border-radius: 12px; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="540" height="960"></canvas></div>
+<script>
+'use strict';
+// STAR CATCH — built from one prompt:
+// "Build a tiny browser game: a one-button arcade catcher called STAR CATCH —
+//  a basket slides along the bottom, stars fall from the sky, catch the gold
+//  stars for points, dodge the red bombs, 60 seconds on the clock."
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const GROUND_Y = H - 130;
+const BASKET_W = 130, BASKET_H = 34;
+const GAME_LEN = 60; // seconds
+
+const params = new URLSearchParams(location.search);
+const AUTO = params.get('auto') === '1'; // auto-play: basket chases the nearest star (for demos / captures)
+
+const state = {
+  mode: 'ready', // ready | playing | over
+  score: 0,
+  lives: 3,
+  timeLeft: GAME_LEN,
+  basketX: W / 2,
+  basketTarget: W / 2,
+  items: [],
+  spawnT: 0,
+  elapsed: 0,
+  caught: 0,
+  dodgedBomb: 0,
+  bgStars: [],
+  flash: 0,
+  shake: 0,
+};
+
+for (let i = 0; i < 90; i++) {
+  state.bgStars.push({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 2 + 0.5, p: Math.random() * 6.28, s: 0.5 + Math.random() * 1.5 });
+}
+
+function rand(a, b) { return a + Math.random() * (b - a); }
+
+function spawnItem() {
+  const bombChance = Math.min(0.32, 0.16 + state.elapsed * 0.003);
+  const isBomb = Math.random() < bombChance;
+  state.items.push({
+    kind: isBomb ? 'bomb' : 'star',
+    x: rand(40, W - 40),
+    y: -30,
+    vy: rand(230, 330) + state.elapsed * 2.2,
+    vx: rand(-40, 40),
+    r: isBomb ? 26 : 24,
+    rot: rand(0, 6.28),
+    vr: rand(-2, 2),
+  });
+}
+
+function drawStar(x, y, r, rot, color) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const rr = i % 2 === 0 ? r : r * 0.45;
+    const a = (i * Math.PI) / 5 - Math.PI / 2;
+    ctx[i === 0 ? 'moveTo' : 'lineTo'](Math.cos(a) * rr, Math.sin(a) * rr);
+  }
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 18;
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawBomb(x, y, r, rot) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, 6.2832);
+  ctx.fillStyle = '#e63946';
+  ctx.shadowColor = '#e63946';
+  ctx.shadowBlur = 16;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#ffb703';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(0, -r);
+  ctx.quadraticCurveTo(14, -r - 18, 24, -r - 10);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(24, -r - 10, 5, 0, 6.2832);
+  ctx.fillStyle = '#ffd60a';
+  ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 26px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('!', 0, 2);
+  ctx.restore();
+}
+
+function drawBasket() {
+  const x = state.basketX - BASKET_W / 2;
+  const y = GROUND_Y;
+  ctx.save();
+  if (state.shake > 0) ctx.translate(rand(-4, 4), 0);
+  ctx.beginPath();
+  ctx.roundRect(x, y, BASKET_W, BASKET_H, 10);
+  ctx.fillStyle = '#ffb703';
+  ctx.shadowColor = '#ffb703';
+  ctx.shadowBlur = 14;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#8d5a00';
+  for (let i = 1; i < 4; i++) {
+    ctx.fillRect(x + (BASKET_W / 4) * i - 2, y + 4, 4, BASKET_H - 8);
+  }
+  ctx.beginPath();
+  ctx.roundRect(x - 6, y - 8, BASKET_W + 12, 12, 6);
+  ctx.fillStyle = '#ffd60a';
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawHUD() {
+  ctx.fillStyle = '#ffffff';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.font = 'bold 34px system-ui, sans-serif';
+  ctx.fillText('★ ' + state.score, 24, 22);
+  ctx.textAlign = 'right';
+  ctx.fillText('⏱ ' + Math.ceil(state.timeLeft) + 's', W - 24, 22);
+  ctx.textAlign = 'left';
+  ctx.font = '32px system-ui, sans-serif';
+  let hearts = '';
+  for (let i = 0; i < 3; i++) hearts += i < state.lives ? '❤' : '🖤';
+  ctx.fillText(hearts, 24, 66);
+}
+
+function drawOverlay(title, lines, cta) {
+  ctx.fillStyle = 'rgba(5, 8, 30, 0.72)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd60a';
+  ctx.font = 'bold 64px system-ui, sans-serif';
+  ctx.fillText(title, W / 2, H * 0.30);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '28px system-ui, sans-serif';
+  lines.forEach((ln, i) => ctx.fillText(ln, W / 2, H * 0.30 + 90 + i * 44));
+  ctx.fillStyle = '#ffb703';
+  ctx.font = 'bold 30px system-ui, sans-serif';
+  ctx.fillText(cta, W / 2, H * 0.30 + 90 + lines.length * 44 + 60);
+}
+
+function update(dt) {
+  state.elapsed += dt;
+  if (state.mode === 'playing') {
+    state.timeLeft -= dt;
+    if (state.timeLeft <= 0) {
+      state.timeLeft = 0;
+      state.mode = 'over';
+    }
+    state.spawnT -= dt;
+    const interval = Math.max(0.35, 0.85 - state.elapsed * 0.006);
+    if (state.spawnT <= 0) {
+      spawnItem();
+      state.spawnT = interval;
+    }
+  }
+  // Basket movement: ease toward target; auto mode chases nearest falling star.
+  if (AUTO && state.mode === 'playing') {
+    let best = null;
+    for (const it of state.items) {
+      if (it.kind === 'star' && (!best || it.y > best.y)) best = it;
+    }
+    if (best) state.basketTarget = best.x;
+  }
+  const dx = state.basketTarget - state.basketX;
+  state.basketX += dx * Math.min(1, dt * 14);
+  state.basketX = Math.max(BASKET_W / 2, Math.min(W - BASKET_W / 2, state.basketX));
+
+  for (const it of state.items) {
+    it.y += it.vy * dt;
+    it.x += it.vx * dt;
+    it.rot += it.vr * dt;
+    if (it.x < 30 || it.x > W - 30) it.vx *= -1;
+  }
+  // Catch / miss.
+  const keep = [];
+  for (const it of state.items) {
+    const inBasket = it.y + it.r >= GROUND_Y - 4 && it.y <= GROUND_Y + BASKET_H &&
+      Math.abs(it.x - state.basketX) < BASKET_W / 2 + it.r * 0.5;
+    if (inBasket && state.mode === 'playing') {
+      if (it.kind === 'star') {
+        state.score += 10;
+        state.caught++;
+      } else {
+        state.lives--;
+        state.flash = 0.35;
+        state.shake = 0.3;
+        if (state.lives <= 0) state.mode = 'over';
+      }
+      continue;
+    }
+    if (it.y - it.r > H) {
+      if (it.kind === 'bomb') state.dodgedBomb++;
+      continue;
+    }
+    keep.push(it);
+  }
+  state.items = keep;
+  if (state.flash > 0) state.flash -= dt;
+  if (state.shake > 0) state.shake -= dt;
+}
+
+function render() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0b1026');
+  g.addColorStop(0.6, '#1b2a6b');
+  g.addColorStop(1, '#3a1c71');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  const t = performance.now() / 1000;
+  for (const s of state.bgStars) {
+    ctx.globalAlpha = 0.35 + 0.65 * Math.abs(Math.sin(t * s.s + s.p));
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, 6.2832);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // Moon
+  ctx.beginPath();
+  ctx.arc(W - 90, 120, 44, 0, 6.2832);
+  ctx.fillStyle = '#fff8d6';
+  ctx.shadowColor = '#fff8d6';
+  ctx.shadowBlur = 30;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  // Ground
+  ctx.fillStyle = '#101736';
+  ctx.fillRect(0, GROUND_Y + BASKET_H, W, H - GROUND_Y - BASKET_H);
+  ctx.fillStyle = '#2a3a7d';
+  ctx.fillRect(0, GROUND_Y + BASKET_H, W, 4);
+
+  for (const it of state.items) {
+    if (it.kind === 'star') drawStar(it.x, it.y, it.r, it.rot, '#ffd60a');
+    else drawBomb(it.x, it.y, it.r, it.rot);
+  }
+  drawBasket();
+  drawHUD();
+  if (state.flash > 0) {
+    ctx.fillStyle = 'rgba(230, 57, 70,' + (state.flash * 1.2) + ')';
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (state.mode === 'ready') {
+    drawOverlay('★ STAR CATCH ★', [
+      'Catch the gold stars: +10',
+      'Dodge the red bombs!',
+      '60 seconds on the clock.',
+      '',
+      'Move: mouse, touch or ← → keys',
+    ], AUTO ? 'Starting…' : 'Click or press SPACE to play');
+  } else if (state.mode === 'over') {
+    const title = state.lives <= 0 ? 'GAME OVER!' : 'TIME UP!';
+    drawOverlay(title, [
+      'Final score: ' + state.score,
+      'Stars caught: ' + state.caught,
+      'Bombs dodged: ' + state.dodgedBomb,
+    ], 'Press R to play again');
+  }
+}
+
+function startGame() {
+  state.mode = 'playing';
+  state.score = 0;
+  state.lives = 3;
+  state.timeLeft = GAME_LEN;
+  state.items = [];
+  state.elapsed = 0;
+  state.caught = 0;
+  state.dodgedBomb = 0;
+  state.spawnT = 0;
+}
+
+function pointerToX(clientX) {
+  const rect = canvas.getBoundingClientRect();
+  return ((clientX - rect.left) / rect.width) * W;
+}
+
+canvas.addEventListener('pointermove', (e) => { state.basketTarget = pointerToX(e.clientX); });
+canvas.addEventListener('pointerdown', (e) => {
+  state.basketTarget = pointerToX(e.clientX);
+  if (state.mode !== 'playing') startGame();
+});
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.code === 'Enter') {
+    if (state.mode !== 'playing') startGame();
+    e.preventDefault();
+  } else if (e.code === 'KeyR' && state.mode === 'over') {
+    startGame();
+  } else if (e.code === 'ArrowLeft') {
+    state.basketTarget = Math.max(BASKET_W / 2, state.basketTarget - 70);
+  } else if (e.code === 'ArrowRight') {
+    state.basketTarget = Math.min(W - BASKET_W / 2, state.basketTarget + 70);
+  }
+});
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+if (AUTO) setTimeout(startGame, 400);
+window.__starCatch = state; // inspectable for verification
+</script>
+</body>
+</html>
