@@ -10,24 +10,26 @@ agent working, and the finished game running.
 
 ## The one prompt
 
-> Build a tiny browser game: a one-button arcade catcher called STAR CATCH —
-> a basket slides along the bottom, stars fall from the sky, catch the gold
-> stars for points, dodge the red bombs, 60 seconds on the clock.
+> Build a tiny browser game: a one-button neon arcade dodger called COMET DASH —
+> a ship slides along the bottom, catch gold comets for points and combos,
+> dodge red asteroids, 60 seconds on the clock.
 
-## The game: STAR CATCH
+## The game: COMET DASH
 
 Open `game.html` in any browser — no network, no build step, no assets.
-A basket slides along the bottom. Gold stars fall from the night sky:
-catch one for +10 points. Red bombs fall too: catch one and you lose a
-life. Three lives, 60 seconds on the clock. Move with the mouse, touch,
-or the arrow keys; press Space to start, R to play again.
+A neon ship slides along the bottom. Gold comets streak down from the
+night sky: catch one for +10 points, and chain catches for a combo
+multiplier up to x5. Red asteroids fall too: hit one and you lose a
+shield. Three shields, 60 seconds on the clock. Move with the mouse,
+touch, or the arrow keys; press Space to start, R to play again.
 
 ## The video
 
-`agent-builds-game.mp4` (48 seconds, 1080×1920) shows the prompt being
-typed, the agent writing the real game code, the finished game being
-played for real, and ends with make.fun's referral end card. The video
-was posted natively on X; its address is in `POST.json`.
+`agent-builds-game-r2.mp4` (47 seconds, 1080×1920) shows the hook over live
+gameplay, the prompt being typed, the agent writing the real game code, the
+finished game being played for real, and ends with make.fun's referral end
+card. The video was posted natively on X; its address is in `POST.json`.
+(Revision 2 of the video; the first version, STAR CATCH, is superseded.)
 
 ## The entry
 

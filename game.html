@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>STAR CATCH — a tiny one-button arcade game</title>
+<title>COMET DASH — a tiny one-button arcade game</title>
 <style>
-  html, body { margin: 0; padding: 0; background: #0b1026; height: 100%; overflow: hidden; }
+  html, body { margin: 0; padding: 0; background: #05030f; height: 100%; overflow: hidden; }
   body { display: flex; align-items: center; justify-content: center; font-family: system-ui, sans-serif; }
   #wrap { position: relative; width: min(100vw, 56.25vh); aspect-ratio: 9 / 16; max-height: 100vh; }
   canvas { display: block; width: 100%; height: 100%; border-radius: 12px; }
@@ -15,156 +15,205 @@
 <div id="wrap"><canvas id="game" width="540" height="960"></canvas></div>
 <script>
 'use strict';
-// STAR CATCH — built from one prompt:
-// "Build a tiny browser game: a one-button arcade catcher called STAR CATCH —
-//  a basket slides along the bottom, stars fall from the sky, catch the gold
-//  stars for points, dodge the red bombs, 60 seconds on the clock."
+// COMET DASH — built from one prompt:
+// "Build a tiny browser game: a one-button neon arcade dodger called COMET DASH —
+//  a ship slides along the bottom, catch gold comets for points and combos,
+//  dodge red asteroids, 60 seconds on the clock."
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 const W = canvas.width, H = canvas.height;
-const GROUND_Y = H - 130;
-const BASKET_W = 130, BASKET_H = 34;
+const SHIP_Y = H - 140;
+const SHIP_W = 120, SHIP_H = 30;
 const GAME_LEN = 60; // seconds
 
 const params = new URLSearchParams(location.search);
-const AUTO = params.get('auto') === '1'; // auto-play: basket chases the nearest star (for demos / captures)
+const AUTO = params.get('auto') === '1'; // auto-play: ship chases the nearest comet (for demos / captures)
 
 const state = {
   mode: 'ready', // ready | playing | over
   score: 0,
+  combo: 0,
+  bestCombo: 0,
   lives: 3,
   timeLeft: GAME_LEN,
-  basketX: W / 2,
-  basketTarget: W / 2,
+  shipX: W / 2,
+  shipTarget: W / 2,
   items: [],
+  parts: [],
+  pops: [],
   spawnT: 0,
   elapsed: 0,
   caught: 0,
-  dodgedBomb: 0,
+  missed: 0,
+  dodgedRock: 0,
   bgStars: [],
   flash: 0,
   shake: 0,
+  trail: [],
 };
 
-for (let i = 0; i < 90; i++) {
-  state.bgStars.push({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 2 + 0.5, p: Math.random() * 6.28, s: 0.5 + Math.random() * 1.5 });
+for (let i = 0; i < 110; i++) {
+  state.bgStars.push({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 2 + 0.5, p: Math.random() * 6.28, s: 0.5 + Math.random() * 2 });
 }
 
 function rand(a, b) { return a + Math.random() * (b - a); }
 
 function spawnItem() {
-  const bombChance = Math.min(0.32, 0.16 + state.elapsed * 0.003);
-  const isBomb = Math.random() < bombChance;
+  const rockChance = Math.min(0.34, 0.18 + state.elapsed * 0.003);
+  const isRock = Math.random() < rockChance;
   state.items.push({
-    kind: isBomb ? 'bomb' : 'star',
+    kind: isRock ? 'rock' : 'comet',
     x: rand(40, W - 40),
     y: -30,
-    vy: rand(230, 330) + state.elapsed * 2.2,
-    vx: rand(-40, 40),
-    r: isBomb ? 26 : 24,
+    vy: rand(300, 420) + state.elapsed * 2.6,
+    vx: rand(-50, 50),
+    r: isRock ? 26 : 22,
     rot: rand(0, 6.28),
-    vr: rand(-2, 2),
+    vr: rand(-2.5, 2.5),
+    hue: isRock ? 0 : 45,
   });
 }
 
-function drawStar(x, y, r, rot, color) {
+function burst(x, y, color, n, speed) {
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, 6.2832);
+    const v = rand(speed * 0.3, speed);
+    state.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 40, r: rand(2, 5), color, life: rand(0.35, 0.7), max: 0.7 });
+  }
+}
+
+function popText(x, y, text, color, size) {
+  state.pops.push({ x, y, text, color, size: size || 34, life: 0.9, max: 0.9 });
+}
+
+function drawComet(it) {
   ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(rot);
+  ctx.translate(it.x, it.y);
+  // tail
+  const g = ctx.createLinearGradient(0, 0, -it.vx * 0.35, -it.vy * 0.35);
+  g.addColorStop(0, 'rgba(255, 214, 10, 0.9)');
+  g.addColorStop(1, 'rgba(255, 120, 10, 0)');
+  ctx.strokeStyle = g;
+  ctx.lineWidth = 10;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(-it.vx * 0.35, -it.vy * 0.35);
+  ctx.stroke();
+  ctx.rotate(it.rot);
   ctx.beginPath();
   for (let i = 0; i < 10; i++) {
-    const rr = i % 2 === 0 ? r : r * 0.45;
+    const rr = i % 2 === 0 ? it.r : it.r * 0.45;
     const a = (i * Math.PI) / 5 - Math.PI / 2;
     ctx[i === 0 ? 'moveTo' : 'lineTo'](Math.cos(a) * rr, Math.sin(a) * rr);
   }
   ctx.closePath();
-  ctx.fillStyle = color;
-  ctx.shadowColor = color;
-  ctx.shadowBlur = 18;
+  ctx.fillStyle = '#ffd60a';
+  ctx.shadowColor = '#ffd60a';
+  ctx.shadowBlur = 22;
   ctx.fill();
   ctx.restore();
 }
 
-function drawBomb(x, y, r, rot) {
+function drawRock(it) {
   ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(rot);
+  ctx.translate(it.x, it.y);
+  ctx.rotate(it.rot);
   ctx.beginPath();
-  ctx.arc(0, 0, r, 0, 6.2832);
+  for (let i = 0; i < 9; i++) {
+    const a = (i / 9) * 6.2832;
+    const rr = it.r * (0.78 + 0.22 * Math.sin(i * 2.7 + 1));
+    ctx[i === 0 ? 'moveTo' : 'lineTo'](Math.cos(a) * rr, Math.sin(a) * rr);
+  }
+  ctx.closePath();
   ctx.fillStyle = '#e63946';
   ctx.shadowColor = '#e63946';
-  ctx.shadowBlur = 16;
+  ctx.shadowBlur = 18;
   ctx.fill();
   ctx.shadowBlur = 0;
-  ctx.strokeStyle = '#ffb703';
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.moveTo(0, -r);
-  ctx.quadraticCurveTo(14, -r - 18, 24, -r - 10);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(24, -r - 10, 5, 0, 6.2832);
-  ctx.fillStyle = '#ffd60a';
-  ctx.fill();
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 26px system-ui, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('!', 0, 2);
+  ctx.fillStyle = '#7a1020';
+  ctx.beginPath(); ctx.arc(-8, -6, 6, 0, 6.2832); ctx.fill();
+  ctx.beginPath(); ctx.arc(9, 7, 4, 0, 6.2832); ctx.fill();
   ctx.restore();
 }
 
-function drawBasket() {
-  const x = state.basketX - BASKET_W / 2;
-  const y = GROUND_Y;
+function drawShip() {
+  const x = state.shipX - SHIP_W / 2;
+  const y = SHIP_Y;
   ctx.save();
-  if (state.shake > 0) ctx.translate(rand(-4, 4), 0);
+  if (state.shake > 0) ctx.translate(rand(-5, 5), rand(-3, 3));
+  // engine flame
+  const fl = 14 + Math.sin(performance.now() / 40) * 6;
+  const fg = ctx.createLinearGradient(0, y + SHIP_H, 0, y + SHIP_H + fl + 18);
+  fg.addColorStop(0, '#ffea00');
+  fg.addColorStop(0.5, '#ff7b00');
+  fg.addColorStop(1, 'rgba(255, 60, 0, 0)');
+  ctx.fillStyle = fg;
   ctx.beginPath();
-  ctx.roundRect(x, y, BASKET_W, BASKET_H, 10);
-  ctx.fillStyle = '#ffb703';
-  ctx.shadowColor = '#ffb703';
-  ctx.shadowBlur = 14;
+  ctx.moveTo(x + SHIP_W / 2 - 14, y + SHIP_H);
+  ctx.lineTo(x + SHIP_W / 2 + 14, y + SHIP_H);
+  ctx.lineTo(x + SHIP_W / 2, y + SHIP_H + fl + 18);
+  ctx.closePath();
+  ctx.fill();
+  // hull
+  ctx.beginPath();
+  ctx.moveTo(x + SHIP_W / 2, y - 16);
+  ctx.lineTo(x + SHIP_W, y + SHIP_H);
+  ctx.lineTo(x + SHIP_W * 0.72, y + SHIP_H - 8);
+  ctx.lineTo(x + SHIP_W * 0.28, y + SHIP_H - 8);
+  ctx.lineTo(x, y + SHIP_H);
+  ctx.closePath();
+  ctx.fillStyle = '#00e5ff';
+  ctx.shadowColor = '#00e5ff';
+  ctx.shadowBlur = 20;
   ctx.fill();
   ctx.shadowBlur = 0;
-  ctx.fillStyle = '#8d5a00';
-  for (let i = 1; i < 4; i++) {
-    ctx.fillRect(x + (BASKET_W / 4) * i - 2, y + 4, 4, BASKET_H - 8);
-  }
+  // cockpit
   ctx.beginPath();
-  ctx.roundRect(x - 6, y - 8, BASKET_W + 12, 12, 6);
-  ctx.fillStyle = '#ffd60a';
+  ctx.arc(x + SHIP_W / 2, y + 8, 10, 0, 6.2832);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + SHIP_W / 2, y + 8, 6, 0, 6.2832);
+  ctx.fillStyle = '#0b1026';
   ctx.fill();
   ctx.restore();
 }
 
 function drawHUD() {
-  ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
-  ctx.font = 'bold 34px system-ui, sans-serif';
-  ctx.fillText('★ ' + state.score, 24, 22);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 40px system-ui, sans-serif';
+  ctx.fillText(state.score, 24, 20);
+  ctx.font = 'bold 30px system-ui, sans-serif';
+  ctx.fillStyle = '#ffd60a';
+  if (state.combo >= 2) ctx.fillText('COMBO x' + state.combo, 24, 72);
   ctx.textAlign = 'right';
-  ctx.fillText('⏱ ' + Math.ceil(state.timeLeft) + 's', W - 24, 22);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 40px system-ui, sans-serif';
+  ctx.fillText(Math.ceil(state.timeLeft) + 's', W - 24, 20);
   ctx.textAlign = 'left';
   ctx.font = '32px system-ui, sans-serif';
-  let hearts = '';
-  for (let i = 0; i < 3; i++) hearts += i < state.lives ? '❤' : '🖤';
-  ctx.fillText(hearts, 24, 66);
+  let shields = '';
+  for (let i = 0; i < 3; i++) shields += i < state.lives ? '⬢' : '·';
+  ctx.fillStyle = '#00e5ff';
+  ctx.fillText(shields, 24, 118);
 }
 
-function drawOverlay(title, lines, cta) {
-  ctx.fillStyle = 'rgba(5, 8, 30, 0.72)';
+function drawOverlay(title, lines, cta, titleColor) {
+  ctx.fillStyle = 'rgba(4, 3, 18, 0.72)';
   ctx.fillRect(0, 0, W, H);
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#ffd60a';
-  ctx.font = 'bold 64px system-ui, sans-serif';
-  ctx.fillText(title, W / 2, H * 0.30);
+  ctx.fillStyle = titleColor || '#ffd60a';
+  ctx.font = 'bold 62px system-ui, sans-serif';
+  ctx.fillText(title, W / 2, H * 0.28);
   ctx.fillStyle = '#ffffff';
   ctx.font = '28px system-ui, sans-serif';
-  lines.forEach((ln, i) => ctx.fillText(ln, W / 2, H * 0.30 + 90 + i * 44));
-  ctx.fillStyle = '#ffb703';
+  lines.forEach((ln, i) => ctx.fillText(ln, W / 2, H * 0.28 + 92 + i * 44));
+  ctx.fillStyle = '#00e5ff';
   ctx.font = 'bold 30px system-ui, sans-serif';
-  ctx.fillText(cta, W / 2, H * 0.30 + 90 + lines.length * 44 + 60);
+  ctx.fillText(cta, W / 2, H * 0.28 + 92 + lines.length * 44 + 60);
 }
 
 function update(dt) {
@@ -176,23 +225,39 @@ function update(dt) {
       state.mode = 'over';
     }
     state.spawnT -= dt;
-    const interval = Math.max(0.35, 0.85 - state.elapsed * 0.006);
+    const interval = Math.max(0.32, 0.78 - state.elapsed * 0.007);
     if (state.spawnT <= 0) {
       spawnItem();
       state.spawnT = interval;
     }
   }
-  // Basket movement: ease toward target; auto mode chases nearest falling star.
+  // Ship movement: ease toward target; auto mode chases the nearest comet, dodges rocks.
+  // Playtest fix (r2): the first auto run died at ~30s — rocks slipped past the
+  // dodge check because it only looked 260px up and let a low comet override it.
+  // Now any rock within 380px vertically and 120px horizontally takes priority,
+  // and the ship sidesteps 150px decisively instead of 130px.
   if (AUTO && state.mode === 'playing') {
     let best = null;
     for (const it of state.items) {
-      if (it.kind === 'star' && (!best || it.y > best.y)) best = it;
+      if (it.kind === 'comet' && (!best || it.y > best.y)) best = it;
     }
-    if (best) state.basketTarget = best.x;
+    // Dodge first: the closest rock heading for the ship wins over any comet.
+    let threat = null;
+    for (const it of state.items) {
+      if (it.kind === 'rock' && it.y > SHIP_Y - 380 && it.y < SHIP_Y + 40 &&
+          Math.abs(it.x - state.shipX) < 120 && (!threat || it.y > threat.y)) threat = it;
+    }
+    if (threat) {
+      state.shipTarget = threat.x <= state.shipX ? state.shipX + 150 : state.shipX - 150;
+    } else if (best) {
+      state.shipTarget = best.x;
+    }
   }
-  const dx = state.basketTarget - state.basketX;
-  state.basketX += dx * Math.min(1, dt * 14);
-  state.basketX = Math.max(BASKET_W / 2, Math.min(W - BASKET_W / 2, state.basketX));
+  const dx = state.shipTarget - state.shipX;
+  state.shipX += dx * Math.min(1, dt * (AUTO ? 20 : 16));
+  state.shipX = Math.max(SHIP_W / 2, Math.min(W - SHIP_W / 2, state.shipX));
+  state.trail.push({ x: state.shipX, y: SHIP_Y + 18, life: 0.35 });
+  if (state.trail.length > 14) state.trail.shift();
 
   for (const it of state.items) {
     it.y += it.vy * dt;
@@ -203,98 +268,162 @@ function update(dt) {
   // Catch / miss.
   const keep = [];
   for (const it of state.items) {
-    const inBasket = it.y + it.r >= GROUND_Y - 4 && it.y <= GROUND_Y + BASKET_H &&
-      Math.abs(it.x - state.basketX) < BASKET_W / 2 + it.r * 0.5;
-    if (inBasket && state.mode === 'playing') {
-      if (it.kind === 'star') {
-        state.score += 10;
+    const inShip = it.y + it.r >= SHIP_Y - 6 && it.y <= SHIP_Y + SHIP_H &&
+      Math.abs(it.x - state.shipX) < SHIP_W / 2 + it.r * 0.5;
+    if (inShip && state.mode === 'playing') {
+      if (it.kind === 'comet') {
+        state.combo++;
+        if (state.combo > state.bestCombo) state.bestCombo = state.combo;
+        const mult = Math.min(5, state.combo);
+        const gained = 10 * mult;
+        state.score += gained;
         state.caught++;
+        burst(it.x, it.y, '#ffd60a', 16, 260);
+        popText(it.x, SHIP_Y - 70, '+' + gained + (mult > 1 ? '  x' + mult : ''), '#ffd60a', mult > 1 ? 42 : 34);
+        if (state.combo >= 3) popText(W / 2, H * 0.32, 'COMBO x' + mult + '!', '#00e5ff', 52);
       } else {
         state.lives--;
-        state.flash = 0.35;
-        state.shake = 0.3;
+        state.combo = 0;
+        state.flash = 0.4;
+        state.shake = 0.45;
+        burst(it.x, it.y, '#e63946', 22, 320);
+        popText(it.x, SHIP_Y - 70, 'HIT!', '#ff5a6e', 44);
         if (state.lives <= 0) state.mode = 'over';
       }
       continue;
     }
     if (it.y - it.r > H) {
-      if (it.kind === 'bomb') state.dodgedBomb++;
+      if (it.kind === 'rock') state.dodgedRock++;
+      else if (state.mode === 'playing') { state.missed++; state.combo = 0; }
       continue;
     }
     keep.push(it);
   }
   state.items = keep;
+  for (const p of state.parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 300 * dt; p.life -= dt; }
+  state.parts = state.parts.filter(p => p.life > 0);
+  for (const p of state.pops) { p.y -= 55 * dt; p.life -= dt; }
+  state.pops = state.pops.filter(p => p.life > 0);
+  for (const t of state.trail) t.life -= dt;
+  state.trail = state.trail.filter(t => t.life > 0);
   if (state.flash > 0) state.flash -= dt;
   if (state.shake > 0) state.shake -= dt;
 }
 
 function render() {
   const g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, '#0b1026');
-  g.addColorStop(0.6, '#1b2a6b');
-  g.addColorStop(1, '#3a1c71');
+  g.addColorStop(0, '#05030f');
+  g.addColorStop(0.55, '#120a3a');
+  g.addColorStop(1, '#3a0d5c');
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, W, H);
   const t = performance.now() / 1000;
   for (const s of state.bgStars) {
-    ctx.globalAlpha = 0.35 + 0.65 * Math.abs(Math.sin(t * s.s + s.p));
-    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = 0.3 + 0.7 * Math.abs(Math.sin(t * s.s + s.p));
+    ctx.fillStyle = '#cfe8ff';
     ctx.beginPath();
     ctx.arc(s.x, s.y, s.r, 0, 6.2832);
     ctx.fill();
   }
   ctx.globalAlpha = 1;
-  // Moon
+  // Distant planet
   ctx.beginPath();
-  ctx.arc(W - 90, 120, 44, 0, 6.2832);
-  ctx.fillStyle = '#fff8d6';
-  ctx.shadowColor = '#fff8d6';
-  ctx.shadowBlur = 30;
+  ctx.arc(W - 88, 118, 46, 0, 6.2832);
+  ctx.fillStyle = '#ff5da2';
+  ctx.shadowColor = '#ff5da2';
+  ctx.shadowBlur = 34;
   ctx.fill();
   ctx.shadowBlur = 0;
-  // Ground
-  ctx.fillStyle = '#101736';
-  ctx.fillRect(0, GROUND_Y + BASKET_H, W, H - GROUND_Y - BASKET_H);
-  ctx.fillStyle = '#2a3a7d';
-  ctx.fillRect(0, GROUND_Y + BASKET_H, W, 4);
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.ellipse(W - 88, 118, 74, 16, -0.4, 0, 6.2832);
+  ctx.stroke();
+  // Ground glow line
+  ctx.fillStyle = '#0a061f';
+  ctx.fillRect(0, SHIP_Y + SHIP_H + 26, W, H - SHIP_Y - SHIP_H - 26);
+  ctx.fillStyle = '#00e5ff';
+  ctx.globalAlpha = 0.5;
+  ctx.fillRect(0, SHIP_Y + SHIP_H + 26, W, 3);
+  ctx.globalAlpha = 1;
+
+  // ship trail
+  for (const tr of state.trail) {
+    ctx.globalAlpha = Math.max(0, tr.life / 0.35) * 0.5;
+    ctx.fillStyle = '#00e5ff';
+    ctx.beginPath();
+    ctx.arc(tr.x, tr.y, 7, 0, 6.2832);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
 
   for (const it of state.items) {
-    if (it.kind === 'star') drawStar(it.x, it.y, it.r, it.rot, '#ffd60a');
-    else drawBomb(it.x, it.y, it.r, it.rot);
+    if (it.kind === 'comet') drawComet(it);
+    else drawRock(it);
   }
-  drawBasket();
+  drawShip();
+  // particles
+  for (const p of state.parts) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, 6.2832);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // pop texts
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const p of state.pops) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    ctx.font = 'bold ' + p.size + 'px system-ui, sans-serif';
+    ctx.fillStyle = p.color;
+    ctx.shadowColor = p.color;
+    ctx.shadowBlur = 14;
+    ctx.fillText(p.text, p.x, p.y);
+  }
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+
   drawHUD();
   if (state.flash > 0) {
-    ctx.fillStyle = 'rgba(230, 57, 70,' + (state.flash * 1.2) + ')';
+    ctx.fillStyle = 'rgba(230, 57, 70,' + (state.flash * 1.1) + ')';
     ctx.fillRect(0, 0, W, H);
   }
   if (state.mode === 'ready') {
-    drawOverlay('★ STAR CATCH ★', [
-      'Catch the gold stars: +10',
-      'Dodge the red bombs!',
+    drawOverlay('☄ COMET DASH ☄', [
+      'Catch the gold comets: +10',
+      'Chain them for COMBO x5!',
+      'Dodge the red asteroids!',
       '60 seconds on the clock.',
       '',
       'Move: mouse, touch or ← → keys',
-    ], AUTO ? 'Starting…' : 'Click or press SPACE to play');
+    ], AUTO ? 'Starting…' : 'Click or press SPACE to play', '#00e5ff');
   } else if (state.mode === 'over') {
-    const title = state.lives <= 0 ? 'GAME OVER!' : 'TIME UP!';
+    const title = state.lives <= 0 ? 'SHIP DOWN!' : 'TIME UP!';
     drawOverlay(title, [
       'Final score: ' + state.score,
-      'Stars caught: ' + state.caught,
-      'Bombs dodged: ' + state.dodgedBomb,
-    ], 'Press R to play again');
+      'Comets caught: ' + state.caught,
+      'Best combo: x' + state.bestCombo,
+      'Rocks dodged: ' + state.dodgedRock,
+    ], 'Press R to play again', '#ff5da2');
   }
 }
 
 function startGame() {
   state.mode = 'playing';
   state.score = 0;
+  state.combo = 0;
+  state.bestCombo = 0;
   state.lives = 3;
   state.timeLeft = GAME_LEN;
   state.items = [];
+  state.parts = [];
+  state.pops = [];
   state.elapsed = 0;
   state.caught = 0;
-  state.dodgedBomb = 0;
+  state.missed = 0;
+  state.dodgedRock = 0;
   state.spawnT = 0;
 }
 
@@ -303,9 +432,9 @@ function pointerToX(clientX) {
   return ((clientX - rect.left) / rect.width) * W;
 }
 
-canvas.addEventListener('pointermove', (e) => { state.basketTarget = pointerToX(e.clientX); });
+canvas.addEventListener('pointermove', (e) => { state.shipTarget = pointerToX(e.clientX); });
 canvas.addEventListener('pointerdown', (e) => {
-  state.basketTarget = pointerToX(e.clientX);
+  state.shipTarget = pointerToX(e.clientX);
   if (state.mode !== 'playing') startGame();
 });
 window.addEventListener('keydown', (e) => {
@@ -315,9 +444,9 @@ window.addEventListener('keydown', (e) => {
   } else if (e.code === 'KeyR' && state.mode === 'over') {
     startGame();
   } else if (e.code === 'ArrowLeft') {
-    state.basketTarget = Math.max(BASKET_W / 2, state.basketTarget - 70);
+    state.shipTarget = Math.max(SHIP_W / 2, state.shipTarget - 70);
   } else if (e.code === 'ArrowRight') {
-    state.basketTarget = Math.min(W - BASKET_W / 2, state.basketTarget + 70);
+    state.shipTarget = Math.min(SHIP_W / 2, state.shipTarget + 70);
   }
 });
 
@@ -331,7 +460,7 @@ function loop(now) {
 }
 requestAnimationFrame(loop);
 if (AUTO) setTimeout(startGame, 400);
-window.__starCatch = state; // inspectable for verification
+window.__cometDash = state; // inspectable for verification
 </script>
 </body>
 </html>
