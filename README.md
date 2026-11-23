@@ -10,26 +10,29 @@ agent working, and the finished game running.
 
 ## The one prompt
 
-> Build a tiny browser game: a one-button neon arcade dodger called COMET DASH —
-> a ship slides along the bottom, catch gold comets for points and combos,
-> dodge red asteroids, 60 seconds on the clock.
+> Build a tiny browser game: a chain-reaction orb blast called ORB CHAIN —
+> tap an orb to detonate it, nearby orbs explode in chains, bigger chains
+> mean bigger points, 60 seconds on the clock.
 
-## The game: COMET DASH
+## The game: ORB CHAIN
 
 Open `game.html` in any browser — no network, no build step, no assets.
-A neon ship slides along the bottom. Gold comets streak down from the
-night sky: catch one for +10 points, and chain catches for a combo
-multiplier up to x5. Red asteroids fall too: hit one and you lose a
-shield. Three shields, 60 seconds on the clock. Move with the mouse,
-touch, or the arrow keys; press Space to start, R to play again.
+Coloured orbs drift across a dark field. Tap one and it detonates: its
+blast ring catches every orb nearby, and those detonate in turn, chaining
+outward. Each orb in a chain is worth 10 points times its place in the
+chain — a 10-orb chain pays far more than ten single taps. Big chains
+flash "CHAIN xN!" across the screen. 60 seconds on the clock; the field
+restocks as you clear it. Tap or click to detonate, Space to start,
+R to play again.
 
 ## The video
 
-`agent-builds-game-r2.mp4` (47 seconds, 1080×1920) shows the hook over live
+`agent-builds-game-r3.mp4` (50 seconds, 1080×1920) shows the hook over live
 gameplay, the prompt being typed, the agent writing the real game code, the
 finished game being played for real, and ends with make.fun's referral end
 card. The video was posted natively on X; its address is in `POST.json`.
-(Revision 2 of the video; the first version, STAR CATCH, is superseded.)
+(Revision 3 of the video; the earlier versions, STAR CATCH and COMET DASH,
+are superseded.)
 
 ## The entry
 

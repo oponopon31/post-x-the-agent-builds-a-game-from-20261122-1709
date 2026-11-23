@@ -2,465 +2,365 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>COMET DASH — a tiny one-button arcade game</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>ORB CHAIN — tap to detonate, chains multiply your score</title>
 <style>
-  html, body { margin: 0; padding: 0; background: #05030f; height: 100%; overflow: hidden; }
-  body { display: flex; align-items: center; justify-content: center; font-family: system-ui, sans-serif; }
-  #wrap { position: relative; width: min(100vw, 56.25vh); aspect-ratio: 9 / 16; max-height: 100vh; }
-  canvas { display: block; width: 100%; height: 100%; border-radius: 12px; }
+  html, body { margin: 0; padding: 0; background: #070312; height: 100%; overflow: hidden; }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; background: #070312; touch-action: none; }
 </style>
 </head>
 <body>
 <div id="wrap"><canvas id="game" width="540" height="960"></canvas></div>
 <script>
 'use strict';
-// COMET DASH — built from one prompt:
-// "Build a tiny browser game: a one-button neon arcade dodger called COMET DASH —
-//  a ship slides along the bottom, catch gold comets for points and combos,
-//  dodge red asteroids, 60 seconds on the clock."
-const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
-const W = canvas.width, H = canvas.height;
-const SHIP_Y = H - 140;
-const SHIP_W = 120, SHIP_H = 30;
-const GAME_LEN = 60; // seconds
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+const W = 540, H = 960;
 
-const params = new URLSearchParams(location.search);
-const AUTO = params.get('auto') === '1'; // auto-play: ship chases the nearest comet (for demos / captures)
+const PALETTE = ['#ff2e63', '#ffd60a', '#00e5ff', '#7cff4f', '#ff9f1c', '#c77dff', '#ff5da2'];
+const RUN_SECONDS = 60;
+const BLAST_RADIUS = 132;
+const MAX_ORBS = 26;
 
-const state = {
-  mode: 'ready', // ready | playing | over
-  score: 0,
-  combo: 0,
-  bestCombo: 0,
-  lives: 3,
-  timeLeft: GAME_LEN,
-  shipX: W / 2,
-  shipTarget: W / 2,
-  items: [],
-  parts: [],
-  pops: [],
-  spawnT: 0,
-  elapsed: 0,
-  caught: 0,
-  missed: 0,
-  dodgedRock: 0,
-  bgStars: [],
-  flash: 0,
-  shake: 0,
-  trail: [],
-};
-
-for (let i = 0; i < 110; i++) {
-  state.bgStars.push({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 2 + 0.5, p: Math.random() * 6.28, s: 0.5 + Math.random() * 2 });
+function fitCanvas() {
+  const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+  cv.style.width = Math.floor(W * s) + 'px';
+  cv.style.height = Math.floor(H * s) + 'px';
 }
+window.addEventListener('resize', fitCanvas);
+fitCanvas();
 
 function rand(a, b) { return a + Math.random() * (b - a); }
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+function dist(a, b) { const dx = a.x - b.x, dy = a.y - b.y; return Math.sqrt(dx * dx + dy * dy); }
 
-function spawnItem() {
-  const rockChance = Math.min(0.34, 0.18 + state.elapsed * 0.003);
-  const isRock = Math.random() < rockChance;
-  state.items.push({
-    kind: isRock ? 'rock' : 'comet',
-    x: rand(40, W - 40),
-    y: -30,
-    vy: rand(300, 420) + state.elapsed * 2.6,
-    vx: rand(-50, 50),
-    r: isRock ? 26 : 22,
-    rot: rand(0, 6.28),
-    vr: rand(-2.5, 2.5),
-    hue: isRock ? 0 : 45,
-  });
+let best = 0;
+try { best = parseInt(localStorage.getItem('orbChainBest') || '0', 10) || 0; } catch (e) {}
+
+const G = {
+  mode: 'start',      // start | playing | over
+  score: 0,
+  chain: 0,           // orbs detonated in the current tap's chain
+  bestChain: 0,
+  timeLeft: RUN_SECONDS,
+  detonated: 0,
+  taps: 0,
+  orbs: [],
+  rings: [],
+  sparks: [],
+  pops: [],
+  shake: 0,
+  spawnTimer: 0,
+  elapsed: 0,
+  auto: new URLSearchParams(location.search).get('auto') === '1',
+  autoTimer: 0,
+};
+window.__orbChain = G;
+
+function makeOrb(x, y) {
+  const r = rand(21, 33);
+  return {
+    x: x !== undefined ? x : rand(r + 8, W - r - 8),
+    y: y !== undefined ? y : rand(170, H - r - 90),
+    r: r,
+    color: pick(PALETTE),
+    vx: rand(-46, 46),
+    vy: rand(-38, 38),
+    pulse: rand(0, Math.PI * 2),
+    alive: true,
+    boomAt: 0,
+  };
 }
 
-function burst(x, y, color, n, speed) {
+function seedField() {
+  G.orbs = [];
+  for (let i = 0; i < MAX_ORBS; i++) G.orbs.push(makeOrb());
+}
+
+function addPop(x, y, text, color, size) {
+  G.pops.push({ x: x, y: y, text: text, color: color, size: size || 34, life: 1 });
+}
+
+function burst(x, y, color, n) {
   for (let i = 0; i < n; i++) {
-    const a = rand(0, 6.2832);
-    const v = rand(speed * 0.3, speed);
-    state.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 40, r: rand(2, 5), color, life: rand(0.35, 0.7), max: 0.7 });
+    const a = rand(0, Math.PI * 2), sp = rand(60, 320);
+    G.sparks.push({ x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, color: color, life: rand(0.4, 0.9), max: 0.9, r: rand(2, 5) });
   }
 }
 
-function popText(x, y, text, color, size) {
-  state.pops.push({ x, y, text, color, size: size || 34, life: 0.9, max: 0.9 });
-}
-
-function drawComet(it) {
-  ctx.save();
-  ctx.translate(it.x, it.y);
-  // tail
-  const g = ctx.createLinearGradient(0, 0, -it.vx * 0.35, -it.vy * 0.35);
-  g.addColorStop(0, 'rgba(255, 214, 10, 0.9)');
-  g.addColorStop(1, 'rgba(255, 120, 10, 0)');
-  ctx.strokeStyle = g;
-  ctx.lineWidth = 10;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(-it.vx * 0.35, -it.vy * 0.35);
-  ctx.stroke();
-  ctx.rotate(it.rot);
-  ctx.beginPath();
-  for (let i = 0; i < 10; i++) {
-    const rr = i % 2 === 0 ? it.r : it.r * 0.45;
-    const a = (i * Math.PI) / 5 - Math.PI / 2;
-    ctx[i === 0 ? 'moveTo' : 'lineTo'](Math.cos(a) * rr, Math.sin(a) * rr);
-  }
-  ctx.closePath();
-  ctx.fillStyle = '#ffd60a';
-  ctx.shadowColor = '#ffd60a';
-  ctx.shadowBlur = 22;
-  ctx.fill();
-  ctx.restore();
-}
-
-function drawRock(it) {
-  ctx.save();
-  ctx.translate(it.x, it.y);
-  ctx.rotate(it.rot);
-  ctx.beginPath();
-  for (let i = 0; i < 9; i++) {
-    const a = (i / 9) * 6.2832;
-    const rr = it.r * (0.78 + 0.22 * Math.sin(i * 2.7 + 1));
-    ctx[i === 0 ? 'moveTo' : 'lineTo'](Math.cos(a) * rr, Math.sin(a) * rr);
-  }
-  ctx.closePath();
-  ctx.fillStyle = '#e63946';
-  ctx.shadowColor = '#e63946';
-  ctx.shadowBlur = 18;
-  ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.fillStyle = '#7a1020';
-  ctx.beginPath(); ctx.arc(-8, -6, 6, 0, 6.2832); ctx.fill();
-  ctx.beginPath(); ctx.arc(9, 7, 4, 0, 6.2832); ctx.fill();
-  ctx.restore();
-}
-
-function drawShip() {
-  const x = state.shipX - SHIP_W / 2;
-  const y = SHIP_Y;
-  ctx.save();
-  if (state.shake > 0) ctx.translate(rand(-5, 5), rand(-3, 3));
-  // engine flame
-  const fl = 14 + Math.sin(performance.now() / 40) * 6;
-  const fg = ctx.createLinearGradient(0, y + SHIP_H, 0, y + SHIP_H + fl + 18);
-  fg.addColorStop(0, '#ffea00');
-  fg.addColorStop(0.5, '#ff7b00');
-  fg.addColorStop(1, 'rgba(255, 60, 0, 0)');
-  ctx.fillStyle = fg;
-  ctx.beginPath();
-  ctx.moveTo(x + SHIP_W / 2 - 14, y + SHIP_H);
-  ctx.lineTo(x + SHIP_W / 2 + 14, y + SHIP_H);
-  ctx.lineTo(x + SHIP_W / 2, y + SHIP_H + fl + 18);
-  ctx.closePath();
-  ctx.fill();
-  // hull
-  ctx.beginPath();
-  ctx.moveTo(x + SHIP_W / 2, y - 16);
-  ctx.lineTo(x + SHIP_W, y + SHIP_H);
-  ctx.lineTo(x + SHIP_W * 0.72, y + SHIP_H - 8);
-  ctx.lineTo(x + SHIP_W * 0.28, y + SHIP_H - 8);
-  ctx.lineTo(x, y + SHIP_H);
-  ctx.closePath();
-  ctx.fillStyle = '#00e5ff';
-  ctx.shadowColor = '#00e5ff';
-  ctx.shadowBlur = 20;
-  ctx.fill();
-  ctx.shadowBlur = 0;
-  // cockpit
-  ctx.beginPath();
-  ctx.arc(x + SHIP_W / 2, y + 8, 10, 0, 6.2832);
-  ctx.fillStyle = '#ffffff';
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(x + SHIP_W / 2, y + 8, 6, 0, 6.2832);
-  ctx.fillStyle = '#0b1026';
-  ctx.fill();
-  ctx.restore();
-}
-
-function drawHUD() {
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'top';
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 40px system-ui, sans-serif';
-  ctx.fillText(state.score, 24, 20);
-  ctx.font = 'bold 30px system-ui, sans-serif';
-  ctx.fillStyle = '#ffd60a';
-  if (state.combo >= 2) ctx.fillText('COMBO x' + state.combo, 24, 72);
-  ctx.textAlign = 'right';
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 40px system-ui, sans-serif';
-  ctx.fillText(Math.ceil(state.timeLeft) + 's', W - 24, 20);
-  ctx.textAlign = 'left';
-  ctx.font = '32px system-ui, sans-serif';
-  let shields = '';
-  for (let i = 0; i < 3; i++) shields += i < state.lives ? '⬢' : '·';
-  ctx.fillStyle = '#00e5ff';
-  ctx.fillText(shields, 24, 118);
-}
-
-function drawOverlay(title, lines, cta, titleColor) {
-  ctx.fillStyle = 'rgba(4, 3, 18, 0.72)';
-  ctx.fillRect(0, 0, W, H);
-  ctx.textAlign = 'center';
-  ctx.fillStyle = titleColor || '#ffd60a';
-  ctx.font = 'bold 62px system-ui, sans-serif';
-  ctx.fillText(title, W / 2, H * 0.28);
-  ctx.fillStyle = '#ffffff';
-  ctx.font = '28px system-ui, sans-serif';
-  lines.forEach((ln, i) => ctx.fillText(ln, W / 2, H * 0.28 + 92 + i * 44));
-  ctx.fillStyle = '#00e5ff';
-  ctx.font = 'bold 30px system-ui, sans-serif';
-  ctx.fillText(cta, W / 2, H * 0.28 + 92 + lines.length * 44 + 60);
-}
-
-function update(dt) {
-  state.elapsed += dt;
-  if (state.mode === 'playing') {
-    state.timeLeft -= dt;
-    if (state.timeLeft <= 0) {
-      state.timeLeft = 0;
-      state.mode = 'over';
-    }
-    state.spawnT -= dt;
-    const interval = Math.max(0.32, 0.78 - state.elapsed * 0.007);
-    if (state.spawnT <= 0) {
-      spawnItem();
-      state.spawnT = interval;
+function detonate(orb, depth) {
+  if (!orb.alive) return;
+  orb.alive = false;
+  G.chain += 1;
+  G.detonated += 1;
+  if (G.chain > G.bestChain) G.bestChain = G.chain;
+  const pts = 10 * G.chain;
+  G.score += pts;
+  G.rings.push({ x: orb.x, y: orb.y, r: orb.r, max: BLAST_RADIUS, color: orb.color, life: 1 });
+  burst(orb.x, orb.y, orb.color, 16);
+  addPop(orb.x, orb.y - orb.r - 6, '+' + pts, orb.color, G.chain >= 4 ? 46 : 32);
+  G.shake = Math.min(9, G.shake + 2);
+  // Any live orb the blast ring reaches joins the chain, slightly delayed.
+  for (const other of G.orbs) {
+    if (other.alive && other.boomAt === 0 && dist(orb, other) < BLAST_RADIUS + other.r) {
+      other.boomAt = G.elapsed + 0.09 + depth * 0.02;
     }
   }
-  // Ship movement: ease toward target; auto mode chases the nearest comet, dodges rocks.
-  // Playtest fix (r2): the first auto run died at ~30s — rocks slipped past the
-  // dodge check because it only looked 260px up and let a low comet override it.
-  // Now any rock within 380px vertically and 120px horizontally takes priority,
-  // and the ship sidesteps 150px decisively instead of 130px.
-  if (AUTO && state.mode === 'playing') {
-    let best = null;
-    for (const it of state.items) {
-      if (it.kind === 'comet' && (!best || it.y > best.y)) best = it;
-    }
-    // Dodge first: the closest rock heading for the ship wins over any comet.
-    let threat = null;
-    for (const it of state.items) {
-      if (it.kind === 'rock' && it.y > SHIP_Y - 380 && it.y < SHIP_Y + 40 &&
-          Math.abs(it.x - state.shipX) < 120 && (!threat || it.y > threat.y)) threat = it;
-    }
-    if (threat) {
-      state.shipTarget = threat.x <= state.shipX ? state.shipX + 150 : state.shipX - 150;
-    } else if (best) {
-      state.shipTarget = best.x;
-    }
-  }
-  const dx = state.shipTarget - state.shipX;
-  state.shipX += dx * Math.min(1, dt * (AUTO ? 20 : 16));
-  state.shipX = Math.max(SHIP_W / 2, Math.min(W - SHIP_W / 2, state.shipX));
-  state.trail.push({ x: state.shipX, y: SHIP_Y + 18, life: 0.35 });
-  if (state.trail.length > 14) state.trail.shift();
-
-  for (const it of state.items) {
-    it.y += it.vy * dt;
-    it.x += it.vx * dt;
-    it.rot += it.vr * dt;
-    if (it.x < 30 || it.x > W - 30) it.vx *= -1;
-  }
-  // Catch / miss.
-  const keep = [];
-  for (const it of state.items) {
-    const inShip = it.y + it.r >= SHIP_Y - 6 && it.y <= SHIP_Y + SHIP_H &&
-      Math.abs(it.x - state.shipX) < SHIP_W / 2 + it.r * 0.5;
-    if (inShip && state.mode === 'playing') {
-      if (it.kind === 'comet') {
-        state.combo++;
-        if (state.combo > state.bestCombo) state.bestCombo = state.combo;
-        const mult = Math.min(5, state.combo);
-        const gained = 10 * mult;
-        state.score += gained;
-        state.caught++;
-        burst(it.x, it.y, '#ffd60a', 16, 260);
-        popText(it.x, SHIP_Y - 70, '+' + gained + (mult > 1 ? '  x' + mult : ''), '#ffd60a', mult > 1 ? 42 : 34);
-        if (state.combo >= 3) popText(W / 2, H * 0.32, 'COMBO x' + mult + '!', '#00e5ff', 52);
-      } else {
-        state.lives--;
-        state.combo = 0;
-        state.flash = 0.4;
-        state.shake = 0.45;
-        burst(it.x, it.y, '#e63946', 22, 320);
-        popText(it.x, SHIP_Y - 70, 'HIT!', '#ff5a6e', 44);
-        if (state.lives <= 0) state.mode = 'over';
-      }
-      continue;
-    }
-    if (it.y - it.r > H) {
-      if (it.kind === 'rock') state.dodgedRock++;
-      else if (state.mode === 'playing') { state.missed++; state.combo = 0; }
-      continue;
-    }
-    keep.push(it);
-  }
-  state.items = keep;
-  for (const p of state.parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 300 * dt; p.life -= dt; }
-  state.parts = state.parts.filter(p => p.life > 0);
-  for (const p of state.pops) { p.y -= 55 * dt; p.life -= dt; }
-  state.pops = state.pops.filter(p => p.life > 0);
-  for (const t of state.trail) t.life -= dt;
-  state.trail = state.trail.filter(t => t.life > 0);
-  if (state.flash > 0) state.flash -= dt;
-  if (state.shake > 0) state.shake -= dt;
+  if (G.chain >= 4) addPop(W / 2, 300, 'CHAIN x' + G.chain + '!', '#ffd60a', 64);
 }
 
-function render() {
-  const g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, '#05030f');
-  g.addColorStop(0.55, '#120a3a');
-  g.addColorStop(1, '#3a0d5c');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, W, H);
-  const t = performance.now() / 1000;
-  for (const s of state.bgStars) {
-    ctx.globalAlpha = 0.3 + 0.7 * Math.abs(Math.sin(t * s.s + s.p));
-    ctx.fillStyle = '#cfe8ff';
-    ctx.beginPath();
-    ctx.arc(s.x, s.y, s.r, 0, 6.2832);
-    ctx.fill();
+function tapAt(x, y) {
+  if (G.mode !== 'playing') return;
+  let hit = null, bestD = 1e9;
+  for (const o of G.orbs) {
+    if (!o.alive) continue;
+    const d = Math.hypot(o.x - x, o.y - y);
+    if (d < o.r + 14 && d < bestD) { bestD = d; hit = o; }
   }
-  ctx.globalAlpha = 1;
-  // Distant planet
-  ctx.beginPath();
-  ctx.arc(W - 88, 118, 46, 0, 6.2832);
-  ctx.fillStyle = '#ff5da2';
-  ctx.shadowColor = '#ff5da2';
-  ctx.shadowBlur = 34;
-  ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.ellipse(W - 88, 118, 74, 16, -0.4, 0, 6.2832);
-  ctx.stroke();
-  // Ground glow line
-  ctx.fillStyle = '#0a061f';
-  ctx.fillRect(0, SHIP_Y + SHIP_H + 26, W, H - SHIP_Y - SHIP_H - 26);
-  ctx.fillStyle = '#00e5ff';
-  ctx.globalAlpha = 0.5;
-  ctx.fillRect(0, SHIP_Y + SHIP_H + 26, W, 3);
-  ctx.globalAlpha = 1;
-
-  // ship trail
-  for (const tr of state.trail) {
-    ctx.globalAlpha = Math.max(0, tr.life / 0.35) * 0.5;
-    ctx.fillStyle = '#00e5ff';
-    ctx.beginPath();
-    ctx.arc(tr.x, tr.y, 7, 0, 6.2832);
-    ctx.fill();
-  }
-  ctx.globalAlpha = 1;
-
-  for (const it of state.items) {
-    if (it.kind === 'comet') drawComet(it);
-    else drawRock(it);
-  }
-  drawShip();
-  // particles
-  for (const p of state.parts) {
-    ctx.globalAlpha = Math.max(0, p.life / p.max);
-    ctx.fillStyle = p.color;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.r, 0, 6.2832);
-    ctx.fill();
-  }
-  ctx.globalAlpha = 1;
-  // pop texts
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  for (const p of state.pops) {
-    ctx.globalAlpha = Math.max(0, p.life / p.max);
-    ctx.font = 'bold ' + p.size + 'px system-ui, sans-serif';
-    ctx.fillStyle = p.color;
-    ctx.shadowColor = p.color;
-    ctx.shadowBlur = 14;
-    ctx.fillText(p.text, p.x, p.y);
-  }
-  ctx.shadowBlur = 0;
-  ctx.globalAlpha = 1;
-
-  drawHUD();
-  if (state.flash > 0) {
-    ctx.fillStyle = 'rgba(230, 57, 70,' + (state.flash * 1.1) + ')';
-    ctx.fillRect(0, 0, W, H);
-  }
-  if (state.mode === 'ready') {
-    drawOverlay('☄ COMET DASH ☄', [
-      'Catch the gold comets: +10',
-      'Chain them for COMBO x5!',
-      'Dodge the red asteroids!',
-      '60 seconds on the clock.',
-      '',
-      'Move: mouse, touch or ← → keys',
-    ], AUTO ? 'Starting…' : 'Click or press SPACE to play', '#00e5ff');
-  } else if (state.mode === 'over') {
-    const title = state.lives <= 0 ? 'SHIP DOWN!' : 'TIME UP!';
-    drawOverlay(title, [
-      'Final score: ' + state.score,
-      'Comets caught: ' + state.caught,
-      'Best combo: x' + state.bestCombo,
-      'Rocks dodged: ' + state.dodgedRock,
-    ], 'Press R to play again', '#ff5da2');
-  }
+  if (!hit) return;
+  G.taps += 1;
+  G.chain = 0;
+  detonate(hit, 0);
 }
 
 function startGame() {
-  state.mode = 'playing';
-  state.score = 0;
-  state.combo = 0;
-  state.bestCombo = 0;
-  state.lives = 3;
-  state.timeLeft = GAME_LEN;
-  state.items = [];
-  state.parts = [];
-  state.pops = [];
-  state.elapsed = 0;
-  state.caught = 0;
-  state.missed = 0;
-  state.dodgedRock = 0;
-  state.spawnT = 0;
+  G.mode = 'playing';
+  G.score = 0;
+  G.chain = 0;
+  G.bestChain = 0;
+  G.timeLeft = RUN_SECONDS;
+  G.detonated = 0;
+  G.taps = 0;
+  G.rings = [];
+  G.sparks = [];
+  G.pops = [];
+  G.elapsed = 0;
+  G.spawnTimer = 0;
+  seedField();
 }
 
-function pointerToX(clientX) {
-  const rect = canvas.getBoundingClientRect();
-  return ((clientX - rect.left) / rect.width) * W;
-}
-
-canvas.addEventListener('pointermove', (e) => { state.shipTarget = pointerToX(e.clientX); });
-canvas.addEventListener('pointerdown', (e) => {
-  state.shipTarget = pointerToX(e.clientX);
-  if (state.mode !== 'playing') startGame();
-});
-window.addEventListener('keydown', (e) => {
-  if (e.code === 'Space' || e.code === 'Enter') {
-    if (state.mode !== 'playing') startGame();
-    e.preventDefault();
-  } else if (e.code === 'KeyR' && state.mode === 'over') {
-    startGame();
-  } else if (e.code === 'ArrowLeft') {
-    state.shipTarget = Math.max(SHIP_W / 2, state.shipTarget - 70);
-  } else if (e.code === 'ArrowRight') {
-    state.shipTarget = Math.min(SHIP_W / 2, state.shipTarget + 70);
+function endGame() {
+  G.mode = 'over';
+  if (G.score > best) {
+    best = G.score;
+    try { localStorage.setItem('orbChainBest', String(best)); } catch (e) {}
   }
-});
+}
+
+function autoPick() {
+  // Detonate the live orb with the most neighbours inside blast range.
+  let target = null, targetN = -1;
+  for (const o of G.orbs) {
+    if (!o.alive) continue;
+    let n = 0;
+    for (const p of G.orbs) if (p.alive && p !== o && dist(o, p) < BLAST_RADIUS + p.r) n++;
+    if (n > targetN) { targetN = n; target = o; }
+  }
+  if (target) tapAt(target.x, target.y);
+}
+
+function step(dt) {
+  G.elapsed += dt;
+  if (G.mode === 'playing') {
+    G.timeLeft -= dt;
+    if (G.timeLeft <= 0) { G.timeLeft = 0; endGame(); }
+    // Delayed chain detonations.
+    for (const o of G.orbs) {
+      if (o.alive && o.boomAt !== 0 && G.elapsed >= o.boomAt) { o.boomAt = 0; detonate(o, 1); }
+    }
+    // Keep the field stocked: chains can wipe most of the field in one
+    // tap, so restock in small bursts instead of one orb at a time.
+    G.spawnTimer += dt;
+    if (G.spawnTimer > 0.6) {
+      G.spawnTimer = 0;
+      const live = G.orbs.filter(o => o.alive).length;
+      for (let i = 0; i < 3 && live + i < MAX_ORBS; i++) G.orbs.push(makeOrb());
+    }
+    if (G.auto) {
+      G.autoTimer += dt;
+      if (G.autoTimer > 0.65) { G.autoTimer = 0; autoPick(); }
+    }
+  }
+  // Drift the orbs.
+  for (const o of G.orbs) {
+    if (!o.alive) continue;
+    o.x += o.vx * dt;
+    o.y += o.vy * dt;
+    o.pulse += dt * 3;
+    if (o.x < o.r + 4) { o.x = o.r + 4; o.vx = Math.abs(o.vx); }
+    if (o.x > W - o.r - 4) { o.x = W - o.r - 4; o.vx = -Math.abs(o.vx); }
+    if (o.y < 150 + o.r) { o.y = 150 + o.r; o.vy = Math.abs(o.vy); }
+    if (o.y > H - o.r - 70) { o.y = H - o.r - 70; o.vy = -Math.abs(o.vy); }
+  }
+  // Blast rings expand and fade.
+  for (const r of G.rings) { r.r += 620 * dt; r.life -= dt * 2.6; }
+  G.rings = G.rings.filter(r => r.life > 0 && r.r < r.max);
+  // Sparks fly and fade.
+  for (const s of G.sparks) { s.x += s.vx * dt; s.y += s.vy * dt; s.vy += 260 * dt; s.life -= dt; }
+  G.sparks = G.sparks.filter(s => s.life > 0);
+  // Score pops float up and fade.
+  for (const p of G.pops) { p.y -= 46 * dt; p.life -= dt * 0.9; }
+  G.pops = G.pops.filter(p => p.life > 0);
+  // Remove dead orbs once their ring is gone.
+  G.orbs = G.orbs.filter(o => o.alive);
+  if (G.shake > 0) G.shake = Math.max(0, G.shake - dt * 26);
+}
+
+function drawOrb(o) {
+  const wobble = 1 + Math.sin(o.pulse) * 0.06;
+  const r = o.r * wobble;
+  const g = ctx.createRadialGradient(o.x - r * 0.3, o.y - r * 0.35, r * 0.1, o.x, o.y, r);
+  g.addColorStop(0, '#ffffff');
+  g.addColorStop(0.25, o.color);
+  g.addColorStop(1, '#101018');
+  ctx.beginPath();
+  ctx.arc(o.x, o.y, r, 0, Math.PI * 2);
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = o.color;
+  ctx.globalAlpha = 0.85;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+function draw() {
+  ctx.save();
+  if (G.shake > 0) ctx.translate(rand(-G.shake, G.shake), rand(-G.shake, G.shake));
+  // Background: deep space with faint stars.
+  ctx.fillStyle = '#070312';
+  ctx.fillRect(-12, -12, W + 24, H + 24);
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  for (let i = 0; i < 70; i++) {
+    const sx = (i * 97) % W, sy = (i * 173) % H;
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+
+  if (G.mode === 'start') {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffd60a';
+    ctx.font = '900 96px Arial, sans-serif';
+    ctx.fillText('ORB', W / 2, 330);
+    ctx.fillStyle = '#00e5ff';
+    ctx.fillText('CHAIN', W / 2, 430);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 34px Arial, sans-serif';
+    ctx.fillText('TAP AN ORB TO', W / 2, 540);
+    ctx.fillText('DETONATE IT', W / 2, 588);
+    ctx.fillStyle = '#ffd60a';
+    ctx.font = 'bold 30px Arial, sans-serif';
+    ctx.fillText('CHAINS MULTIPLY', W / 2, 680);
+    ctx.fillText('YOUR SCORE', W / 2, 722);
+    ctx.fillStyle = '#9aa0c0';
+    ctx.font = '28px Arial, sans-serif';
+    ctx.fillText('60 seconds on the clock', W / 2, 800);
+    ctx.fillStyle = '#7cff4f';
+    ctx.font = 'bold 36px Arial, sans-serif';
+    ctx.fillText('▶  TAP TO START', W / 2, 890);
+    // A few decorative orbs.
+    for (let i = 0; i < 5; i++) {
+      drawOrb({ x: 90 + i * 90, y: 130 + (i % 2) * 26, r: 26, color: PALETTE[i], pulse: i * 1.3 });
+    }
+  } else {
+    for (const o of G.orbs) drawOrb(o);
+    // Blast rings.
+    for (const r of G.rings) {
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, r.r, 0, Math.PI * 2);
+      ctx.lineWidth = 7;
+      ctx.strokeStyle = r.color;
+      ctx.globalAlpha = Math.max(0, r.life);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    // Sparks.
+    for (const s of G.sparks) {
+      ctx.globalAlpha = Math.max(0, s.life / s.max);
+      ctx.fillStyle = s.color;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    // Score pops.
+    ctx.textAlign = 'center';
+    for (const p of G.pops) {
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.font = '900 ' + p.size + 'px Arial, sans-serif';
+      ctx.fillStyle = p.color;
+      ctx.fillText(p.text, p.x, p.y);
+    }
+    ctx.globalAlpha = 1;
+    // HUD.
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '900 84px Arial, sans-serif';
+    ctx.fillText(String(G.score), 24, 108);
+    ctx.font = 'bold 30px Arial, sans-serif';
+    ctx.fillStyle = '#9aa0c0';
+    ctx.fillText('BEST ' + best, 26, 148);
+    ctx.textAlign = 'right';
+    const t = Math.ceil(G.timeLeft);
+    ctx.fillStyle = t <= 10 ? '#ff2e63' : '#ffd60a';
+    ctx.font = '900 84px Arial, sans-serif';
+    ctx.fillText(t + 's', W - 24, 108);
+    ctx.font = 'bold 28px Arial, sans-serif';
+    ctx.fillStyle = '#9aa0c0';
+    ctx.fillText('CHAIN x' + G.bestChain, W - 24, 148);
+
+    if (G.mode === 'over') {
+      ctx.fillStyle = 'rgba(5,3,18,0.82)';
+      ctx.fillRect(0, 0, W, H);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffd60a';
+      ctx.font = '900 72px Arial, sans-serif';
+      ctx.fillText("TIME'S UP!", W / 2, 400);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 40px Arial, sans-serif';
+      ctx.fillText('SCORE  ' + G.score, W / 2, 500);
+      ctx.fillStyle = '#00e5ff';
+      ctx.fillText('BEST CHAIN  x' + G.bestChain, W / 2, 560);
+      ctx.fillText('ORBS BLOWN  ' + G.detonated, W / 2, 620);
+      ctx.fillStyle = '#7cff4f';
+      ctx.font = 'bold 38px Arial, sans-serif';
+      ctx.fillText('PRESS R TO PLAY AGAIN', W / 2, 740);
+    }
+  }
+  ctx.restore();
+}
 
 let last = performance.now();
 function loop(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
-  update(dt);
-  render();
+  step(dt);
+  draw();
   requestAnimationFrame(loop);
 }
+
+function pointerPos(e) {
+  const rect = cv.getBoundingClientRect();
+  return { x: (e.clientX - rect.left) * (W / rect.width), y: (e.clientY - rect.top) * (H / rect.height) };
+}
+
+cv.addEventListener('pointerdown', (e) => {
+  const p = pointerPos(e);
+  if (G.mode === 'start') startGame();
+  else if (G.mode === 'over') startGame();
+  else tapAt(p.x, p.y);
+});
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.code === 'Enter') {
+    if (G.mode !== 'playing') startGame();
+    e.preventDefault();
+  }
+  if (e.code === 'KeyR' && G.mode === 'over') startGame();
+});
+
+seedField();
+if (G.auto) setTimeout(startGame, 400);
 requestAnimationFrame(loop);
-if (AUTO) setTimeout(startGame, 400);
-window.__cometDash = state; // inspectable for verification
 </script>
 </body>
 </html>
